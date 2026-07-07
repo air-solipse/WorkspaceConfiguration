@@ -1,27 +1,23 @@
-# Configuring Linux
+# Personal Computer Configuration
 
 Good day. If you're not me, why are you (still) here?
 
-In any case, these are the instructions and details and notes and such that I am collecting to help with my Linux setup.
-
-This document assumes every part of the setup is in accordance with my [ArchLinux Installation](ArchLinuxInstallation-ISO.md) notes.
+First, [install Arch Linux](ArchLinuxInstallation.md) on your machine.
 
 ## Step 1: Preliminairies
 
-Create a username and password for yourself
+### User
 
+Create a user and set its password
 ```
-useradd -m -G wheel -s /bin/bash username
+useradd -m -G wheel username
 passwd username
 ```
-
-To give sudo power to this new user, open the appropriate configuration file with
+Add the `wheel` group to the sudoers by running
 ```
-vim /etc/sudoers
+EDITOR=vim visudo
 ```
-and uncomment the line `%wheel ALL=(ALL:ALL) ALL`.
-This actually gives sudo power to all users in `wheel`.
-A warning about this being a read-only file may appear. Simply use `:wq!` to close the file and all will be well.
+and uncommenting the line `%wheel ALL=(ALL:ALL) ALL`
 
 Also, before configuring further, install the necessary packages
 ```

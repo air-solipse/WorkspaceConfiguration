@@ -14,6 +14,7 @@ Hence I configure
 ```
 loadkeys ca
 ```
+Other options include Canadian French Layout `cf`.
 
 ### Boot Mode
 
@@ -32,12 +33,20 @@ First get a list of recognized network interfaces with the following command.
 ip link
 ```
 
-Make sure the Wi-Fi card shows up.
-I have not yet had to troubleshoot this part, so it is assumed for now everything is hunky-dory.
+If the Wi-Fi card is not `UP`, run `iwctl`.
+Then, the commands
+```
+device list
+device name set-property Powered on
+station name scan
+station name get-networks
+station name connect network-name
+```
+where `name` is obtained with the first command, will allow the machine to connect to the Wi-Fi. To exit, press `Ctrl+d`.
 
 ### System Clock
 
-Finally, update the system clock to ensure it is synchronized
+Finally, display the status of the internal clock to check if it is correct.
 ```
 timedatectl
 ```
@@ -194,7 +203,7 @@ Open the initramfs file
 ```
 vim /etc/mkinitcpio.conf
 ```
-and edit the `HOOKS=` line to `HOOKS=(base systemd autodetect microcode modeconf kms keyboard sd-vconsole block sd-encrypt btrfs filesystems fsck)`.
+and edit the `HOOKS=` line to `HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt btrfs filesystems fsck)`.
 Hence adding `sd-encrypt` and `btrfs` at the correct locations.
 
 Create a root password
@@ -214,7 +223,8 @@ Then, open
 ```
 vim /etc/default/grub
 ```
-and enable cryptodisk support in GRUB by uncommenting the line `GRUB_ENABLE_CRYPTODISK=y`.
+and enable cryptodisk support in GRUB by uncommenting the line `GRUB_ENABLE_CRYPTODISK=y`. (Apparently, this is superfluous. Need to check.)
+
 Still in the same file, modify the `GRUB_CMDLINE_LINUX=` line to
 ```
 GRUB_CMDLINE_LINUX="rd.luks.name=the-uuid=cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw"

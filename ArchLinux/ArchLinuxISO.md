@@ -1,13 +1,4 @@
-# Installing Linux
-
-Good day. If you're not me, why are you here?
-
-There are way better resources out there...
-For instance, the [Installation guide](https://wiki.archlinux.org/title/Installation_guide) I am poorly following here.
-
-In any case, these are the instructions and details and notes and such that I am collecting to help with my Linux setup.
-
-## Writing the ISO file to a flash drive
+# Writing an ISO file to a flash drive
 
 Booting from an external drive makes more sense to me than the alternatives, so here we are.
 
@@ -24,7 +15,7 @@ diskutil list
 Then, unmount the disk, write the ISO to it and eject it.
 ```
 diskutil unmountDisk /dev/disk2
-sudo dd if=filename.iso of=/dev/rdisk2 bs=4M
+sudo dd if=filename.iso of=/dev/rdisk2 bs=4m
 diskutil eject /dev/disk2
 ```
 
