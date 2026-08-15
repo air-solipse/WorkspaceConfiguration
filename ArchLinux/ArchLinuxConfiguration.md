@@ -54,7 +54,7 @@ sudo systemctl enable --now snapper-cleanup.timer
 and configure GRUB snapshot booting.
 ```
 sudo systemctl enable --now grub-btrfsd.service
-sudo grub-mkconfig -o /boot/grub/grub.cfgs
+sudo grub-mkconfig -o /boot/grub/grub.cfg
 ```
 
 ## Step 2: Borg
