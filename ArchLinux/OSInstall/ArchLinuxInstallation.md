@@ -253,4 +253,4 @@ reboot
 ```
 Note: The username to use when loging in is `root`.
 
-The configuration of the system is continued in [the next file](ArchLinuxConfiguration.md).
+The configuration of the system is continued in [the next file](../ArchLinuxConfiguration.md).
