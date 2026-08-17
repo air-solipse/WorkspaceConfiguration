@@ -1,0 +1,347 @@
+#!/bin/bash
+
+set -euo pipefail
+umask 077
+
+#
+# add-peer - Add a WireGuard peer to an existing wg-quick interface.
+#
+# Exit codes:
+#   0 = peer created successfully
+#   1 = peer creation failed and was rolled back
+#   3 = peer created, but a post-commit operation failed
+#
+
+WG_INTERFACE="wg0"
+WG_CONFIG="/etc/wireguard/${WG_INTERFACE}.conf"
+PEER_DIR="/etc/wireguard/peers"
+
+VPN_NETWORK="172.28.18"
+WG_PORT=51820
+
+FIRST_PEER=2
+LAST_PEER=254
+
+
+usage() {
+    cat <<EOF
+Usage: sudo add-peer <name> <server-address>
+
+Examples:
+  sudo add-peer phone vpn.example.com
+  sudo add-peer laptop 203.0.113.50
+  sudo add-peer phone 2001:db8::10
+  sudo add-peer phone [2001:db8::10]
+
+Exit codes:
+  0 = peer created successfully
+  1 = peer creation failed and was rolled back
+  3 = peer created, but a post-commit operation failed
+EOF
+    exit 1
+}
+
+
+die() {
+    echo "Error: $*" >&2
+    exit 1
+}
+
+
+normalize_server_address() {
+    local host="$1"
+
+    [[ -n "$host" ]] ||
+        die "server address may not be empty."
+
+    [[ "$host" != *[[:space:]]* ]] ||
+        die "server address may not contain whitespace."
+
+    [[ "$host" != *"#"* && "$host" != *"="* && "$host" != *","* ]] ||
+        die "invalid server address."
+
+    if [[ "$host" == \[*\] ]]; then
+        host="${host:1:${#host}-2}"
+
+        [[ "$host" == *:* ]] ||
+            die "bracketed server address must be an IPv6 address."
+    elif [[ "$host" == *"["* || "$host" == *"]"* ]]; then
+        die "invalid server address."
+    fi
+
+    if [[ "$host" == *:* ]]; then
+        SERVER_ENDPOINT="[$host]:$WG_PORT"
+    else
+        SERVER_ENDPOINT="$host:$WG_PORT"
+    fi
+}
+
+
+rollback() {
+    echo
+    echo "========================================"
+    echo "Attempting rollback"
+    echo "========================================"
+    echo
+
+    if wg set "$WG_INTERFACE" peer "$PEER_PUBLIC_KEY" remove; then
+        echo "Removed peer from running WireGuard interface."
+    else
+        echo "WARNING: could not remove peer from running WireGuard interface."
+        echo "WARNING: manual intervention may be required."
+        return 1
+    fi
+
+    if cp -- "$BACKUP_FILE" "$WG_CONFIG"; then
+        echo "Restored $WG_CONFIG."
+    else
+        echo "WARNING: could not restore $WG_CONFIG."
+        echo "Original configuration remains at:"
+        echo "  $BACKUP_FILE"
+        echo "WARNING: manual intervention may be required."
+        return 1
+    fi
+
+    rm -f -- "$BACKUP_FILE" "$PEER_CONF"
+    BACKUP_FILE=""
+
+    echo
+    echo "Rollback completed successfully."
+}
+
+
+on_exit() {
+    local status=$?
+
+    if (( status != 0 && !COMMITTED )); then
+        echo
+        echo "========================================"
+        echo "Peer creation failed."
+        echo "========================================"
+
+        if ! rollback; then
+            echo
+            echo "WARNING: manual intervention may be required."
+        fi
+    fi
+
+    exit "$status"
+}
+
+
+[[ $EUID -eq 0 ]] ||
+    die "please run this script with sudo."
+
+[[ $# -eq 2 ]] || usage
+
+PEER_NAME="$1"
+SERVER_ADDRESS="$2"
+
+[[ "$PEER_NAME" =~ ^[a-zA-Z0-9_-]+$ ]] ||
+    die "peer name may contain only letters, numbers, _ and -."
+
+normalize_server_address "$SERVER_ADDRESS"
+
+
+#
+# Only instances of this script are serialized.
+#
+exec 9>/run/lock/add-peer.lock
+
+flock -n 9 ||
+    die "another add-peer operation is already running."
+
+
+[[ -f "$WG_CONFIG" ]] ||
+    die "$WG_CONFIG does not exist. Run the initial server setup first."
+
+install -d -m 700 "$PEER_DIR"
+
+PEER_CONF="$PEER_DIR/${PEER_NAME}.conf"
+BACKUP_FILE=""
+COMMITTED=0
+
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+
+[[ ! -e "$PEER_CONF" ]] ||
+    die "peer '$PEER_NAME' already exists."
+
+
+#
+# wg0.conf is authoritative. SaveConfig would allow wg-quick to
+# overwrite it with runtime state.
+#
+if grep -qiE \
+    '^[[:space:]]*SaveConfig[[:space:]]*=[[:space:]]*true([[:space:]]*#.*)?$' \
+    "$WG_CONFIG"
+then
+    die "$WG_CONFIG contains SaveConfig = true; disable it first."
+fi
+
+
+#
+# Validate the existing configuration and extract its AllowedIPs.
+#
+declare -A USED_IPS
+
+while IFS= read -r ip; do
+    [[ "$ip" == "${VPN_NETWORK}."* ]] ||
+        continue
+
+    USED_IPS["${ip%%/*}"]=1
+done < <(
+    wg-quick strip "$WG_CONFIG" |
+        awk -F'[ =,]+' '
+            /^AllowedIPs/ {
+                for (i = 2; i <= NF; i++)
+                    print $i
+            }
+        '
+)
+
+
+#
+# Allocate the first free VPN address.
+#
+PEER_IP=""
+
+for ((n=FIRST_PEER; n<=LAST_PEER; n++)); do
+    candidate="${VPN_NETWORK}.${n}"
+
+    if [[ -z "${USED_IPS[$candidate]:-}" ]]; then
+        PEER_IP="$candidate"
+        break
+    fi
+done
+
+[[ -n "$PEER_IP" ]] ||
+    die "no free VPN addresses remain."
+
+
+echo "Creating peer: $PEER_NAME"
+echo "VPN address:   $PEER_IP"
+echo
+
+
+#
+# Generate the peer key pair in memory.
+#
+PEER_PRIVATE_KEY="$(wg genkey)"
+PEER_PUBLIC_KEY="$(wg pubkey <<<"$PEER_PRIVATE_KEY")"
+SERVER_PUBLIC_KEY="$(wg show "$WG_INTERFACE" public-key)"
+
+
+#
+# Create the client configuration. umask 077 makes this file 0600.
+#
+cat > "$PEER_CONF" <<EOF
+[Interface]
+PrivateKey = $PEER_PRIVATE_KEY
+Address = ${PEER_IP}/24
+
+[Peer]
+PublicKey = $SERVER_PUBLIC_KEY
+Endpoint = $SERVER_ENDPOINT
+AllowedIPs = ${VPN_NETWORK}.0/24
+PersistentKeepalive = 25
+EOF
+
+
+#
+# Save the original server configuration.
+#
+BACKUP_FILE="${WG_CONFIG}.backup"
+
+[[ ! -e "$BACKUP_FILE" ]] ||
+    die "backup file already exists: $BACKUP_FILE"
+
+cp -- "$WG_CONFIG" "$BACKUP_FILE"
+
+
+#
+# Add the peer to persistent configuration.
+#
+cat >> "$WG_CONFIG" <<EOF
+
+# Peer: $PEER_NAME
+[Peer]
+PublicKey = $PEER_PUBLIC_KEY
+AllowedIPs = ${PEER_IP}/32
+EOF
+
+wg-quick strip "$WG_CONFIG" >/dev/null
+
+
+#
+# Add the peer to the running interface.
+#
+wg set "$WG_INTERFACE" peer "$PEER_PUBLIC_KEY" \
+    allowed-ips "${PEER_IP}/32"
+
+
+#
+# The server-side change is now committed. Failures from here on
+# must not roll it back.
+#
+COMMITTED=1
+
+if ! rm -f -- "$BACKUP_FILE"; then
+    echo
+    echo "Error: peer was created, but the backup could not be removed."
+    echo "Backup remains at:"
+    echo "  $BACKUP_FILE"
+    echo
+    echo "The server-side configuration is committed."
+    exit 3
+fi
+
+BACKUP_FILE=""
+
+
+echo
+echo "========================================"
+echo "Peer created successfully"
+echo "========================================"
+echo
+echo "Name:       $PEER_NAME"
+echo "VPN IP:     $PEER_IP"
+echo "Config:     $PEER_CONF"
+echo
+
+
+#
+# QR generation is optional and purely presentational.
+# The client configuration is always retained.
+#
+if [[ -t 0 && -t 1 ]]; then
+    read -r -p "Generate a QR code for this peer? [y/N]: " QR_CHOICE || QR_CHOICE="n"
+
+    if [[ "$QR_CHOICE" =~ ^[Yy]$ ]]; then
+        echo
+        echo "Scan this QR code with the WireGuard app:"
+        echo
+
+        if ! qrencode -t ansiutf8 < "$PEER_CONF"; then
+            echo
+            echo "Error: could not generate QR code."
+            echo "The peer remains configured on the server."
+            exit 3
+        fi
+
+        echo
+    fi
+fi
+
+
+echo "Client configuration retained at:"
+echo "  $PEER_CONF"
+echo
+echo "The configuration contains the client's private key."
+echo "Delete it manually once the peer has been connected and"
+echo "the configuration is no longer needed."
+echo
+
+exit 0
